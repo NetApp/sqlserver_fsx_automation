@@ -129,6 +129,7 @@ Parameters:
   RouteTableIDs:
     Description: Explicit route table IDs if any. enter values separated by comma ',' (e,g, rtb-001,rtb-002)
     Type: String
+    Default: ""
   S3BucketName:
     AllowedPattern: "^[0-9a-zA-Z]+([0-9a-zA-Z-]*[0-9a-zA-Z])*$"
     ConstraintDescription: The s3 bucket name can include numbers, lowercase
@@ -212,11 +213,8 @@ Parameters:
     Description: CIDR block for the VPC.
     Type: String
 Conditions:
-  RouteTableIdsExists:
-    Fn::Not:
-      - Fn::Equals:
-          - !Ref RouteTableIDs
-          - ""
+  RouteTableIdsExists: !Not [!Equals [!Ref RouteTableIDs, ""]]
+
 Rules:
   KeyPairsNotEmpty:
     Assertions:
@@ -427,6 +425,7 @@ Resources:
                   - ec2:DescribeNetworkInterfaces
                   - ec2:DescribeSubnets
                   - ssm:*
+                  - lambda:*
                   - fsx:Describe*
                   - fsx:ListTagsForResource
                 Resource: '*'
@@ -1206,12 +1205,12 @@ Resources:
               responseData = {}
 
               # 1. retrieve resource reference ID or Name
-              ResourceRef1=event['ResourceProperties']['ResourceRef1']
-              ResourceRef2=event['ResourceProperties']['ResourceRef2']
-              ResourceRef3=event['ResourceProperties']['ResourceRef3']
-              ResourceRef4=event['ResourceProperties']['ResourceRef4']
-              ResourceRef5=event['ResourceProperties']['ResourceRef5']
-              ResourceRef7=event['ResourceProperties']['ResourceRef7']
+              ResourceRef1=event['ResourceRef1']
+              ResourceRef2=event['ResourceRef2']
+              ResourceRef3=event['ResourceRef3']
+              ResourceRef4=event['ResourceRef4']
+              ResourceRef5=event['ResourceRef5']
+              ResourceRef7=event['ResourceRef7']
 
               ResourceRef1 = ResourceRef1.encode("ascii")
               ResourceRef1=base64.b64encode(ResourceRef1)
@@ -1409,10 +1408,10 @@ Resources:
         ThroughputCapacity: !Ref FileShareThroughputCapacity
         #Password can be stored in Secrets manager and referenced from there
         FsxAdminPassword: !Sub '${FSxAdminPassword}'
-        RouteTableIds:
-          !If
+        RouteTableIds: 
+          Fn::If:
             - RouteTableIdsExists
-            - !Split [",", !Ref RouteTableIDs]
+            - Fn::Split: [",", Ref: RouteTableIDs]
             - !Ref "AWS::NoValue"
   FSxOntapStorageVirtualMachine:
     Type: AWS::FSx::StorageVirtualMachine
