@@ -25,6 +25,7 @@ Metadata:
       - VPCID
       - PrivateSubnet1ID
       - PrivateSubnet2ID
+      - RouteTableIDs
       - VPCcidr
     - Label:
         default: Microsoft Active Directory configuration
@@ -69,6 +70,8 @@ Metadata:
         default: Private subnet 1 ID
       PrivateSubnet2ID:
         default: Private subnet 2 ID
+      RouteTableIDs:
+        default: Explicit route table IDs if any
       VPCcidr:
         default: VPC CIDR
       QSS3BucketName:
@@ -155,6 +158,10 @@ Parameters:
     Description: ID of private subnet 2 in Availability Zone 2 for the workload (e.g.,
       subnet-a0246dcd).
     Type: AWS::EC2::Subnet::Id
+  RouteTableIDs:
+    Description: Explicit route table IDs if any. enter values separated by comma ',' (e,g, rtb-001,rtb-002)
+    Type: String
+    Default: ""
   QSS3BucketName:
     AllowedPattern: "^[0-9a-zA-Z]+([0-9a-zA-Z-]*[0-9a-zA-Z])*$"
     ConstraintDescription: The Quick Start bucket name can include numbers, lowercase
@@ -257,6 +264,7 @@ Parameters:
     Type: String
   WorkloadInstanceType:
     AllowedValues:
+    - t3.medium
     - t3a.2xlarge
     - t3.2xlarge
     - r5a.xlarge
@@ -304,6 +312,8 @@ Parameters:
     Default: 10.0.0.0/16
     Description: CIDR block for the VPC.
     Type: String
+Conditions:
+  RouteTableIdsExists: !Not [!Equals [!Ref RouteTableIDs, ""]]
 Rules:
   KeyPairsNotEmpty:
     Assertions:
@@ -782,32 +792,6 @@ Resources:
               commands:
                 - |
                    C:\ProgramData\Amazon\EC2-Windows\Launch\Scripts\InitializeDisks.ps1
-        # - name: "InstallDSCModules"
-        #   action: "aws:runCommand"
-        #   onFailure: "step:signalfailure"
-        #   inputs:
-        #     DocumentName: "AWS-RunRemoteScript"
-        #     InstanceIds: '{{GetAllClusterNodes.InstanceIds}}'
-        #     CloudWatchOutputConfig:
-        #       CloudWatchOutputEnabled: "true"
-        #       CloudWatchLogGroupName: !Ref 'SQLAutomationLogs'
-        #     Parameters:
-        #       sourceType: "S3"
-        #       sourceInfo: !Sub '{"path": "https://{{QSS3BucketName}}.s3.{{URLSuffix}}/{{QSS3KeyPrefix}}/install-dsc-modules.ps1"}'
-        #       commandLine: "./install-dsc-modules.ps1"
-        # - name: "wsfcnLCMConfig"
-        #   action: "aws:runCommand"
-        #   onFailure: "step:signalfailure"
-        #   inputs:
-        #     DocumentName: "AWS-RunRemoteScript"
-        #     InstanceIds: '{{GetAllClusterNodes.InstanceIds}}'
-        #     CloudWatchOutputConfig:
-        #       CloudWatchOutputEnabled: "true"
-        #       CloudWatchLogGroupName: !Ref 'SQLAutomationLogs'
-        #     Parameters:
-        #       sourceType: "S3"
-        #       sourceInfo: !Sub '{"path": "https://{{QSS3BucketName}}.s3.{{URLSuffix}}/{{QSS3KeyPrefix}}/LCM-Config.ps1"}'
-        #       commandLine: "./LCM-Config.ps1"
         # Joining to AD
         - name: "JoinAD"
           action: "aws:runCommand"
@@ -835,92 +819,6 @@ Resources:
               sourceType: "S3"
               sourceInfo: !Sub '{"path": "https://{{QSS3BucketName}}.s3.{{URLSuffix}}/enable-CredSSP.ps1"}'
               commandLine: "./enable-CredSSP.ps1 -DomainDNSName '{{DomainDNSName}}'"
-        - name: ConfigureIscsi
-          action: 'aws:executeScript'
-          onFailure: "step:signalfailure"
-          inputs:
-            Runtime: PowerShell Core 6.0
-            Script:
-                |
-                 $inputPayload = $env:InputPayload | ConvertFrom-Json;
-                 Install-Module AWS.Tools.EC2 -Force
-                 Import-Module AWS.Tools.EC2
-
-                 #Function to find Subnet
-                 function Get-SubnetMask($i)
-                 {
-                    $instance = $i
-                    $subnetid = $instance.instances[0].NetworkInterfaces.SubnetId
-                    $subnet = get-ec2subnet -SubnetId $subnetid
-                    $cidr = $subnet.CidrBlock
-                    $cidr_mask = $cidr.split('/')[1]
-                    $A = 0
-                    $A_Index = 8
-                    $B = 0
-                    $B_Index = 16
-                    $C = 0
-                    $C_Index = 24
-                    $D = 0
-                    $D_Index = 32
-                    for ($i = 1; $i -le $cidr_mask; $i++)
-                    {
-                        if ($i -le $A_Index)
-                        {
-                            $A += ([Math]::Pow(2, 8 - $i))
-                        }
-                        elseif ($i -le $B_Index)
-                        {
-                            $B += ([Math]::Pow(2, 8 - $i + $A_Index))
-                        }
-                        elseif ($i -le $C_Index)
-                        {
-                            $C += ([Math]::Pow(2, 8 - $i + $B_Index))
-                        }
-                        elseif ($i -le $D_Index)
-                        {
-                            $D += ([Math]::Pow(2, 8 - $i + $C_Index))
-                        }
-                    }
-                    $subnet_mask = "{0}.{1}.{2}.{3}" -f $A, $B, $C, $D
-                    return $subnet_mask
-                 }
-
-                 $instanceIds = $inputPayload.parameter
-
-                 $resultStr = ""
-                 $subnetMaskStr = ""
-
-                 #Finding secondary IP addresses of the primary instance
-                 foreach ($i in $instanceIds)
-                 {
-                   $instance = get-ec2instance -InstanceId $i
-                   $tags = $instance.instances[0].Tags
-                   foreach ($t in $tags)
-                   {
-                       $IPs = $instance.instances[0].NetworkInterfaces.PrivateIpAddresses
-                       $ip1 = $IPs[1].PrivateIpAddress
-                       $ip2 = $IPs[2].PrivateIpAddress
-                       $resultStr = "{0};{1}" -f $ip1, $ip2
-
-                       $subnetMaskStr = Get-SubnetMask($instance)
-                       break;
-                   }
-                   if ([System.String]::IsNullOrEmpty($resultStr) -Eq $False)
-                   {
-                     break;
-                   }
-                 }
-
-                 $resultStr = "{0};{1}" -f $resultStr, $subnetMaskStr
-
-                 Write-Host $dnsName
-                 return @{message=$resultStr}
-            InputPayload:
-              parameter: '{{GetAllClusterNodes.InstanceIds}}'
-          outputs:
-            - Name: SecondaryPrivateIpAddresses
-              Selector: $.Payload.message
-              Type: String
 
         - name: "IscsiInitiator"
           action: "aws:runCommand"
@@ -976,59 +874,6 @@ Resources:
               Selector: $.Payload.message
               Type: String
 
-        # - name: 'IQNRetrival'
-        #   action: "aws:runCommand"
-        #   onFailure: "step:signalfailure"
-        #   inputs:
-        #     DocumentName: "AWS-RunRemoteScript"
-        #     InstanceIds: '{{GetAllClusterNodes.InstanceIds}}'
-        #     CloudWatchOutputConfig:
-        #       CloudWatchOutputEnabled: "true"
-        #       CloudWatchLogGroupName: !Ref 'SQLAutomationLogs'
-        #     Parameters:
-        #       sourceType: "S3"
-        #       sourceInfo: !Sub '{"path": "https://{{QSS3BucketName}}.s3.{{URLSuffix}}/IQNRetrival.ps1"}'
-        #       commandLine: "./IQNRetrival.ps1 -AdminSecret '{{AdminSecrets}}' -DomainNetBIOSName {{DomainNetBIOSName}}"
-        #   outputs:
-        #     - Name: 'IqnValue'
-        #       # Selector: $.Payload
-        #       Selector: $.CommandPlugins[0].Output
-        #       Type: String
-
-        # - name: "CreateParameter"
-        #   action: "aws:runCommand"
-        #   onFailure: "step:signalfailure"
-        #   inputs:
-        #     DocumentName: "AWS-RunShellScript"
-        #     Parameters:
-        #       commands:
-        #         - "aws ssm put-parameter --name /netappautomation/sql/iqnvalue --value '{{IQNRetrival.IqnValue}}' --type String --overwrite"
-        
-        # - name: "GetInstanceInformation"
-        #   action: "aws:runCommand"
-        #   inputs:
-        #     DocumentName: "AWS-RunPowerShellScript"
-        #     Parameters:
-        #       commands: |
-        #         $instanceId = '{{InstanceId}}'
-        #         $ssmParameterName = '{{SsmParameterName}}'
-        #         $instance = Get-EC2Instance -InstanceIds $instanceId
-        #         $nodename = $instance.PrivateDnsName
-        #         $iqn = (Get-InitiatorId | Select-Object -ExpandProperty 'NodeAddress').TrimEnd(':')
-        #         Set-SSMParameterValue -Name $ssmParameterName -Value "$nodename $iqn"
-        #   outputs:
-        #     - name: "SsmParameterValue"
-        #       selector: "($.AutomationExecution.Outputs['GetInstanceInformation'].SSMParameterValue)"
-
-        # - name: "SaveOutputAsSSMParameter"
-        #   action: "aws:ssm:putParameter"
-        #   inputs:
-        #     Name: "/netappautomation/sql/iqnvalue"
-        #     Type: "String"
-        #     Value: "{{IQNRetrival.IqnValue}}"
-        #     Overwrite: true
-        #   onFailure: "step:signalfailure"
-
         - name: "MPIOSetup"
           action: "aws:runCommand"
           onFailure: "step:signalfailure"
@@ -1062,48 +907,6 @@ Resources:
                 TrimmedIQN: '{{IQNParse.Iqn}}'
                 SVMName: '{{SVMName}}'
                 LUNSize: '{{LUNSize}}'
-            # Payload: '{ "ResourceRef1": "fsxadmin:{{FSxAdminPassword}}", "ResourceRef2": "{{FSxMgmtIp}}", "ResourceRef3": "{{IQNRetrival.Output}}", "ResourceRef4": "windows_2008", "ResourceRef5": "{{SVMName}}", "ResourceRef7": "{{LUNSize}}" }'        
-            # Payload: !Sub
-            #   - |
-            #     {
-            #       "ResourceRef1": "fsxadmin:${FSxAdminPassword}",
-            #       "ResourceRef2": "${FSxMgmtIp}",
-            #       "ResourceRef3": "${IQNRetrival_IqnValue}",
-            #       "ResourceRef4": "windows_2008",
-            #       "ResourceRef5": "${SVMName}",
-            #       "ResourceRef7": "${LUNSize}",
-            #       "OutputBucket": "${OutputBucket}",
-            #       "OutputPrefix": "${OutputPrefix}"
-            #     }
-            #   - {IQNRetrival_IqnValue: !JsonPath $.IQNRetrival.IqnValue}
-            # Payload: !Sub |
-            #   {
-            #     "ResourceRef1": "fsxadmin:{{FSxAdminPassword}}",
-            #     "ResourceRef2": "{{FSxMgmtIp}}",
-            #     "ResourceRef3": "{{IQNRetrival.Output}}",
-            #     "ResourceRef4": "windows_2008",
-            #     "ResourceRef5": "{{SVMName}}",
-            #     "ResourceRef7": "{{LUNSize}}"
-            #   }
-            # Payload: '{ "ResourceRef1": "fsxadmin:{{FSxAdminPassword}}", "ResourceRef2": "{{FSxMgmtIp}}", "ResourceRef3": "{{IQNRetrival.IqnValue}}", "ResourceRef4": "windows_2008", "ResourceRef5": "{{SVMName}}", "ResourceRef7": "{{LUNSize}}" }'        
-            # Payload: !Sub |
-            #   {
-            #     "ResourceRef1": "fsxadmin:${FSxAdminPassword}",
-            #     "ResourceRef2": "${FSxMgmtIp}",
-            #     "ResourceRef3": "${IQNRetrival.IqnValue}",
-            #     "ResourceRef4": "windows_2008",
-            #     "ResourceRef5": "${SVMName}",
-            #     "ResourceRef7": "${LUNSize}"
-            #   }
-            # need to fix this
-            # Payload: '{ "ResourceRef1": "fsxadmin:{{FSxAdminPassword}}", "ResourceRef2": "{{FSxMgmtIp}}", "ResourceRef3": "{{IQNRetrival.IqnValue}}", "ResourceRef4": "windows_2008", "ResourceRef5": "{{SVMName}}", "ResourceRef7": "{{LUNSize}}" }'        
-
-
-        # - name: 'InvokeSMBConfigLambda'
-        #   action: 'aws:invokeLambdaFunction'
-        #   inputs:
-        #     FunctionName: !Ref CustomFsxCmdFunction
-        #     Payload: "{\"ResourceRef1\": \"fsxadmin:Netapp123\", \"ResourceRef2\": \"${FSxMgmtIp}\", \"ResourceRef3\": \"${IQNRetrival.IqnValue}\", \"ResourceRef4\": \"windows_2008\", \"ResourceRef5\": \"${SVMName}\", \"ResourceRef7\": \"${LUNSize}\"}"
 
         - name: "MountIscsiDiskOnInstance"
           action: "aws:runCommand"
@@ -1504,26 +1307,7 @@ Resources:
               responseData = {"Data": str(err)}
               cfnresponse.send(event,context,cfnresponse.FAILED,responseData)
             return
-  # S3GatewayEndpoint:
-  #   Type: 'AWS::EC2::VPCEndpoint'
-  #   Properties:
-  #     PolicyDocument:
-  #       Version: '2012-10-17'
-  #       Statement:
-  #         - Effect: Allow
-  #           Principal: '*'
-  #           Action:
-  #             - 's3:GetObject'
-  #             - 's3:ListBucket'
-  #             - 's3:GetBucketLocation'
-  #             - 's3:PutObject'
-  #           Resource:
-  #             - 'arn:aws:s3:::*'
-  #             - 'arn:aws:s3:::*/*'
-  #     RouteTableIds:
-  #       - !Sub '${CustomFSXResource.route_table_id}'
-  #     ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
-  #     VpcId: !Ref VPCID
+
   LambdaLayer:
     Type: AWS::Lambda::LayerVersion
     Properties:
@@ -1535,20 +1319,7 @@ Resources:
         S3Bucket: !Sub ${QSS3BucketName}
         S3Key: packages.zip
       LayerName: pythonRequests
-  # CustomFsxCmdResource:
-  #     Type: AWS::CloudFormation::CustomResource
-  #     DependsOn: LambdaLayer
-  #     Properties:
-  #       ServiceToken: !GetAtt 'CustomFsxCmdFunction.Arn'
-  #       ResourceRef1: !Sub 'fsxadmin:Netapp123' #to be changed
-  #       ResourceRef2: !Sub '${CustomFSXResource.FSMgmtIP}'
-  #       ResourceRef3: !Sub '${CustomFSXResource.iqn_val}'
-  #       ResourceRef4: 'windows_2008'
-  #       ResourceRef5: !Sub ${CustomFSXResource.SVMName}
-  #       ResourceRef6: 'sql'
-  #       ResourceRef7: '10'  #lun1
-  #       ResourceRef8: '10'  #lun2
-  #       ResourceRef9: '10'  #lun3
+
   CustomFsxCmdFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -1678,98 +1449,6 @@ Resources:
               responseData = {"Data": str(err)}
             return
 
-
-  # CustomIscsiResource:
-  #   Type: AWS::CloudFormation::CustomResource
-  #   DependsOn: CustomFsxCmdResource
-  #   Properties:
-  #     ServiceToken: !GetAtt 'CustomIscsiFunction.Arn'
-  #     ResourceRef1: !Sub '${CustomFSXResource.FsxSvmIscsiIP1}'
-  #     ResourceRef2: !Sub '${CustomFSXResource.FsxSvmIscsiIP2}'
-  #     ResourceRef3: !Ref SqlFSxInstance1
-  #     ResourceRef4: '10' #lun3
-  #     ResourceRef5: 'G'
-  #     ResourceRef6: !GetAtt SqlFSxInstance1.PrivateIp
-  #     ResourceRef7: !Ref SqlFSxAutomation
-  #     ResourceRef8: !Ref SqlFSxInstance1
-  #     ResourceRef9: !Sub "${AWS::URLSuffix}"
-  #     ResourceRef10: !Sub "${QSS3BucketName}"
-  #     ResourceRef11: !Sub "${QSS3KeyPrefix}"
-  #     ResourceRef12: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${SqlFSxAutomationRole}"
-
-  # CustomIscsiFunction:
-  #   Type: AWS::Lambda::Function
-  #   Properties:
-  #     Handler: index.lambda_handler
-  #     Description: "Sets up ISCSI"
-  #     Timeout: 400
-  #     Role: !GetAtt 'LambdaBasicExecutionRoleOntap.Arn'
-  #     Runtime: python3.7
-  #     Code:
-  #       ZipFile: |
-  #         import json
-  #         import logging
-  #         import cfnresponse
-  #         import boto3
-  #         import time
-  #         logger = logging.getLogger()
-  #         logger.setLevel(logging.INFO)
-  #         def lambda_handler(event, context):
-  #           logger.info('got event {}'.format(event))
-  #           try:
-  #             responseData = {}
-  #             if event['RequestType'] == 'Delete':
-  #               logger.info('Incoming RequestType: Delete operation')
-  #               cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
-  #             if event['RequestType'] in ["Create", "Update"]:
-  #               time.sleep(180)
-  #               # 1. retrieve resource reference ID or Name
-  #               ResourceRef1= event['ResourceProperties']['ResourceRef1']
-  #               ResourceRef2=event['ResourceProperties']['ResourceRef2']
-  #               ResourceRef3=event['ResourceProperties']['ResourceRef3']
-  #               ResourceRef4=event['ResourceProperties']['ResourceRef4']
-  #               ResourceRef5=event['ResourceProperties']['ResourceRef5']
-  #               ResourceRef6=event['ResourceProperties']['ResourceRef6']
-  #               ResourceRef7=event['ResourceProperties']['ResourceRef7']
-  #               ResourceRef8=event['ResourceProperties']['ResourceRef8']
-  #               ResourceRef9=event['ResourceProperties']['ResourceRef9']
-  #               ResourceRef10=event['ResourceProperties']['ResourceRef10']
-  #               ResourceRef11=event['ResourceProperties']['ResourceRef11']
-  #               ResourceRef12=event['ResourceProperties']['ResourceRef12']
-  #               #Code for Windows ISCSI initiator config
-
-
-  #               str = "$TargetPortals = ('" + ResourceRef1 + "','" + ResourceRef2 + "')"
-  #               str1 = '$diskNumberString = Get-Disk | findstr NETAPP | findstr Online | findstr ' + ResourceRef4
-  #               str2 = 'New-Partition -DiskNumber $diskNumber -DriveLetter ' + ResourceRef5 + ' -UseMaximumSize'
-  #               str3 = 'Format-Volume -DriveLetter ' + ResourceRef5 + ' -FileSystem NTFS -AllocationUnitSize 65536'
-  #               str4 = 'foreach ($TargetPortal in $TargetPortals) {New-IscsiTargetPortal -TargetPortalAddress $TargetPortal -TargetPortalPortNumber 3260 -InitiatorPortalAddress ' + ResourceRef6 + '}'
-  #               str5 = '1..4 | %{Foreach($TargetPortal in $TargetPortals){Get-IscsiTarget | Connect-IscsiTarget -IsMultipathEnabled $true -TargetPortalAddress $TargetPortal -InitiatorPortalAddress ' + ResourceRef6 + ' -IsPersistent $true} }'
-  #               str6 = "Start-SSMAutomationExecution -DocumentName "+ResourceRef7+" -Parameter @{'SqlFSxInstanceId'='"+ResourceRef8+"';'URLSuffix'='"+ResourceRef9+"';'QSS3BucketName'='"+ResourceRef10+"';'QSS3KeyPrefix'='"+ResourceRef11+"';'AutomationAssumeRole'='"+ResourceRef12+"'}"
-
-  #               ssm_client = boto3.client('ssm')
-  #               response3 = ssm_client.send_command(InstanceIds=[ResourceRef3], DocumentName="AWS-RunPowerShellScript", Parameters={'commands': [str, str4,'New-MSDSMSupportedHW -VendorId MSFT2005 -ProductId iSCSIBusType_0x9', str5, 'Set-MSDSMGlobalDefaultLoadBalancePolicy -Policy RR', '$disks = Get-Disk | where PartitionStyle -eq raw', 'foreach ($disk in $disks) {Initialize-Disk $disk.Number}', str1, '$diskNumber = $diskNumberString.split()[0]', str2, str3, str6]}, CloudWatchOutputConfig={ 'CloudWatchOutputEnabled': True} )
-  #               time.sleep(10)
-  #               command_id = response3.get('Command').get('CommandId')
-  #               time.sleep(10)
-  #               op3 = ssm_client.get_command_invocation( CommandId= command_id, InstanceId= ResourceRef3)
-  #               op3_val = op3.get('StandardOutputContent')
-  #               if "error" in op3_val.lower():
-  #                 logger.error("Error with FSX Mount on RDS Instance")
-  #                 responseData = {"Data": op3_val}
-  #                 cfnresponse.send(event,context,cfnresponse.FAILED,responseData)
-
-  #               logger.info('Mount completed')
-  #               cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
-  #             else:
-  #               logger.info('Unexpected RequestType!')
-  #               cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
-  #           except Exception as err:
-  #             logger.error(err)
-  #             responseData = {"Data": str(err)}
-  #             cfnresponse.send(event,context,cfnresponse.FAILED,responseData)
-  #           return
-
   FSxOntapFileSystem:
     Type: 'AWS::FSx::FileSystem'
     Properties:
@@ -1795,10 +1474,11 @@ Resources:
         ThroughputCapacity: !Ref FileShareThroughputCapacity
         #Password can be stored in Secrets manager and referenced from there
         FsxAdminPassword: !Ref FSxAdminPassword
-        RouteTableIds:
-          - "rtb-05348b4215f53e63b"
-          - "rtb-0f119d7b13cc01d26"
-        # RouteTableIds: !Split [',', !Ref PrivateRouteTable]
+        RouteTableIds: 
+          Fn::If:
+            - RouteTableIdsExists
+            - Fn::Split: [",", Ref: RouteTableIDs]
+            - !Ref "AWS::NoValue"
         # ActiveDirectoryId: !Sub '${DirectoryId}'
   FSxOntapStorageVirtualMachine:
     Type: AWS::FSx::StorageVirtualMachine
