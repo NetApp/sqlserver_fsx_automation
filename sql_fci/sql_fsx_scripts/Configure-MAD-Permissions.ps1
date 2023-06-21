@@ -8,11 +8,16 @@ param(
     [string]$DomainNetBIOSName,
 
 	[Parameter(Mandatory=$true)]
-    [string]$wsfcName
+    [string]$wsfcName,
+
+    [Parameter(Mandatory=$true)]
+    [string]$DomainDNSName
+
 )
 
 
 $HostName = hostname
+$HostAddress = "{0}.{1}" -f $HostName, $DomainDNSName
 $AdminUser = ConvertFrom-Json -InputObject (Get-SECSecretValue -SecretId $AdminSecret).SecretString
 $ClusterAdminUser = $DomainNetBIOSName + '\' + $AdminUser.UserName
 $Credentials = (New-Object PSCredential($ClusterAdminUser,(ConvertTo-SecureString $AdminUser.Password -AsPlainText -Force)))
@@ -35,4 +40,4 @@ Invoke-Command -scriptblock {
 	$acl.AddAccessRule($ace1)
 	$acl.AddAccessRule($ACE2)
 	Set-acl -aclobject $acl "ad:$OU"
-} -Credential $Credentials -ComputerName $HostName -Authentication credssp
+} -Credential $Credentials -ComputerName $HostAddress -Authentication credssp

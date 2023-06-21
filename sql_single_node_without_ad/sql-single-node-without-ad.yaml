@@ -896,6 +896,11 @@ Resources:
             - "\n"
             - "$instanceId = (New-Object System.Net.WebClient).DownloadString('http://169.254.169.254/latest/meta-data/instance-id')\n"
             - "$instanceIp = (New-Object System.Net.WebClient).DownloadString('http://169.254.169.254/latest/meta-data/local-ipv4')\n"
+            - "$webClient = New-Object System.Net.WebClient\n"
+            - "$url = 'https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/windows_amd64/AmazonSSMAgentSetup.exe'\n"
+            - "$outputPath = \"$env:USERPROFILE\\Desktop\\SSMAgent_latest.exe\"\n"
+            - "$webClient.DownloadFile($url, $outputPath)\n"
+            - "Start-Process -FilePath $outputPath -ArgumentList '/S'\n"
             - 'Start-SSMAutomationExecution -DocumentName '
             - !Sub '"${SqlFSxAutomation}"'
             - ' -Parameter @{'

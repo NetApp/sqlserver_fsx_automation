@@ -14,11 +14,15 @@ param(
     [string]$MSSQLMediaBucket,
 
 	[Parameter(Mandatory=$true)]
-    [string]$MSSQLMediaKey
+    [string]$MSSQLMediaKey,
+
+    [Parameter(Mandatory=$true)]
+    [string]$DomainDNSName
 
 )
 
 $HostName = hostname
+$HostAddress = "{0}.{1}" -f $HostName, $DomainDNSName
 
 # Creating Credential Object for Administrator
 $AdminUser = ConvertFrom-Json -InputObject (Get-SECSecretValue -SecretId $AdminSecret).SecretString
@@ -48,4 +52,4 @@ Dismount-DiskImage -ImagePath $mediaIsoPath
 $arguments = '/ACTION="PrepareFailoverCluster" /IAcceptSQLServerLicenseTerms="True" /IACCEPTROPENLICENSETERMS="False" /SUPPRESSPRIVACYSTATEMENTNOTICE="True" /ENU="True" /QUIET="True" /UpdateEnabled="False" /USEMICROSOFTUPDATE="False" /SUPPRESSPAIDEDITIONNOTICE="True" /UpdateSource="MU" /FEATURES=SQLENGINE,REPLICATION,FULLTEXT,DQ /HELP="False" /INDICATEPROGRESS="False" /X86="False" /INSTANCENAME="MSSQLSERVER" /INSTALLSHAREDDIR="C:\Program Files\Microsoft SQL Server" /INSTALLSHAREDWOWDIR="C:\Program Files (x86)\Microsoft SQL Server" /INSTANCEID="MSSQLSERVER" /INSTANCEDIR="C:\Program Files\Microsoft SQL Server" /AGTSVCACCOUNT="{0}" /AGTSVCPASSWORD="{1}" /FILESTREAMLEVEL="0" /SQLSVCACCOUNT="{0}" /SQLSVCPASSWORD="{1}" /SQLSVCINSTANTFILEINIT="False" /FTSVCACCOUNT="NT Service\MSSQLFDLauncher"' -f $SqlUserName, $SqlUserPassword
 Invoke-Command -scriptblock {
     Start-Process -FilePath C:\SQLinstallmedia\setup.exe -ArgumentList $Using:arguments -Wait -NoNewWindow
-} -Credential $Credentials -ComputerName $HostName -Authentication credssp
+} -Credential $Credentials -ComputerName $HostAddress -Authentication credssp

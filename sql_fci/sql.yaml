@@ -21,6 +21,7 @@ Metadata:
       - PrivateSubnet1ID
       - PrivateSubnet2ID
       - VPCcidr
+      - PrivateRouteTable
     - Label:
         default: Microsoft Active Directory configuration
       Parameters:
@@ -81,6 +82,8 @@ Metadata:
         default: Private subnet 2 ID
       VPCcidr:
         default: VPC CIDR
+      PrivateRouteTable:
+        default: Subnet route tables for FSx for ONTAP
       QSS3BucketName:
         default: Quick Start S3 bucket name
       QSS3BucketRegion:
@@ -279,6 +282,11 @@ Parameters:
     Type: String
     #Delete Default later
     Default: 10.1.20.255,10.1.52.224
+  PrivateRouteTable:
+    Description: Route table IDs for FSx for ONTAP. Separate these with commas. Default route table will be selected in case of empty input.
+    Type: String
+    #Delete Default later
+    Default: rtb-0c297718f5de65d5e,rtb-0621cb86755dad750
   DomainMemberSGID:
     Description: ID of the domain member security group (e.g., sg-9cb7d0e5).
     Type: String
@@ -309,6 +317,7 @@ Parameters:
     Type: String
   WorkloadInstanceType:
     AllowedValues:
+    - t3.medium
     - t3a.2xlarge
     - t3.2xlarge
     - r5a.xlarge
@@ -328,7 +337,7 @@ Parameters:
     - z1d.xlarge
     ConstraintDescription: Must contain a valid instance type.
     # Default: r5.2xlarge
-    Default: r5.large
+    Default: t3.medium
     Description: Type of EC2 instance for the workload instances.
     Type: String
   MSSQLMediaBucketName:
@@ -640,20 +649,12 @@ Resources:
             default: ""
             description: "ID of the SqlFSx instance"
             type: "String"
-          SqlFSxInstanceIP:
-            default: ""
-            description: "ID of the SqlFSx instance"
-            type: "String"
           StackName:
             default: !Sub "${AWS::StackName}"
             description: "CloudFormation stack name"
             type: "String"
           SqlFSxServerNetBIOSName1:
             default: !Sub "${SqlFSxServerNetBIOSName1}"
-            description: "CloudFormation stack name"
-            type: "String"
-          SqlFSxServerNetBIOSName2:
-            default: !Sub "${SqlFSxServerNetBIOSName2}"
             description: "CloudFormation stack name"
             type: "String"
           AutomationAssumeRole:
@@ -934,6 +935,7 @@ Resources:
               directoryId: "{{DirectoryId}}"
               directoryName: "{{DomainDNSName}}"
               dnsIpAddresses: !Select [0, !Split [",", !Ref ADDnsIpAddresses]]
+        #######################################################################
         - name: "EnableCredSSP"
           action: "aws:runCommand"
           onFailure: "step:signalfailure"
@@ -947,6 +949,144 @@ Resources:
               sourceType: "S3"
               sourceInfo: !Sub '{"path": "https://{{QSS3BucketName}}.s3.{{URLSuffix}}/enable-CredSSP.ps1"}'
               commandLine: "./enable-CredSSP.ps1 -DomainDNSName '{{DomainDNSName}}'"
+
+        - name: "IscsiInitiator"
+          action: "aws:runCommand"
+          onFailure: "step:signalfailure"
+          inputs:
+            DocumentName: "AWS-RunRemoteScript"
+            InstanceIds: '{{GetAllClusterNodes.InstanceIds}}'
+            CloudWatchOutputConfig:
+              CloudWatchOutputEnabled: "true"
+              CloudWatchLogGroupName: !Ref 'SQLAutomationLogs'
+            Parameters:
+              sourceType: "S3"
+              sourceInfo: !Sub '{"path": "https://{{QSS3BucketName}}.s3.{{URLSuffix}}/IscsiInitiator.ps1"}'
+              commandLine: "./IscsiInitiator.ps1 -AdminSecret '{{AdminSecrets}}' -DomainNetBIOSName {{DomainNetBIOSName}} -DomainDNSName '{{DomainDNSName}}'"
+        
+        - name: "IQNRetrival1"
+          action: "aws:runCommand"
+          inputs:
+            DocumentName: "AWS-RunPowerShellScript"
+            InstanceIds: '{{GetClusterNode1.InstanceIds}}'
+            Parameters:
+              commands: |
+                $iqn = (Get-InitiatorPort).NodeAddress
+                $output = @{
+                  iqn = $iqn
+                }
+                Write-Output ($iqn | ConvertTo-Json -Depth 100 -Compress)
+          outputs:
+            - Name: "IqnValue"
+              Selector: "$.AutomationExecution.Outputs['IQNRetrival'].CommandInvocation.Stdout"
+              Type: String
+          
+        - name: "IQNRetrival2"
+          action: "aws:runCommand"
+          inputs:
+            DocumentName: "AWS-RunPowerShellScript"
+            InstanceIds: '{{GetClusterNode2.InstanceIds}}'
+            Parameters:
+              commands: |
+                $iqn = (Get-InitiatorPort).NodeAddress
+                $output = @{
+                  iqn = $iqn
+                }
+                Write-Output ($iqn | ConvertTo-Json -Depth 100 -Compress)
+          outputs:
+            - Name: "IqnValue"
+              Selector: "$.AutomationExecution.Outputs['IQNRetrival'].CommandInvocation.Stdout"
+              Type: String
+
+        - name: IQNParse
+          action: 'aws:executeScript'
+          onFailure: "step:signalfailure"
+          inputs:
+            Runtime: PowerShell Core 6.0
+            Script:
+                |
+                 $inputPayload = $env:InputPayload | ConvertFrom-Json;
+                 $iqn1 = $inputPayload.parameter1
+                 $iqn2 = $inputPayload.parameter2
+
+                 $resultStr1 = $iqn1.Replace(" ", "").Trim().Replace('"','')
+                 $resultStr1 = "{0}" -f $resultStr1
+
+                 $resultStr2 = $iqn2.Replace(" ", "").Trim().Replace('"','')
+                 $resultStr2 = "{0}" -f $resultStr2
+
+                 $resultStr = "{0};{1}" -f $resultStr1, $resultStr2
+
+                 Write-Host $resultStr
+                 return @{message=$resultStr}
+            InputPayload:
+              parameter1: '{{IQNRetrival1.Output}}'
+              parameter2: '{{IQNRetrival2.Output}}'
+          outputs:
+            - Name: Iqn
+              Selector: $.Payload.message
+              Type: String
+
+        - name: "MPIOSetup"
+          action: "aws:runCommand"
+          onFailure: "step:signalfailure"
+          inputs:
+            DocumentName: "AWS-RunRemoteScript"
+            InstanceIds: '{{GetAllClusterNodes.InstanceIds}}'
+            CloudWatchOutputConfig:
+              CloudWatchOutputEnabled: "true"
+              CloudWatchLogGroupName: !Ref 'SQLAutomationLogs'
+            Parameters:
+              sourceType: "S3"
+              sourceInfo: !Sub '{"path": "https://{{QSS3BucketName}}.s3.{{URLSuffix}}/MPIOSetup.ps1"}'
+              commandLine: "./MPIOSetup.ps1 -AdminSecret '{{AdminSecrets}}' -DomainNetBIOSName {{DomainNetBIOSName}} -DomainDNSName '{{DomainDNSName}}'"
+          
+        - name: 'InvokeSMBConfigLambda'
+          action: 'aws:invokeLambdaFunction'
+          inputs:
+            FunctionName: '{{CustomFsxCmdFunction}}'
+            Payload: !Sub
+              - '{ "ResourceRef1": "fsxadmin:${FSxAdminPassword}",
+                  "ResourceRef2": "${FSxMgmtIp}",
+                  "ResourceRef3": "${TrimmedIQN}",
+                  "ResourceRef4": "windows_2008",
+                  "ResourceRef5": "${SVMName}",
+                  "ResourceRef7": "${LUNSize}"
+                }'
+              - FSxAdminPassword: '{{FSxAdminPassword}}'
+                FSxMgmtIp: '{{FSxMgmtIp}}'
+                TrimmedIQN: '{{IQNParse.Iqn}}'
+                SVMName: '{{SVMName}}'
+                LUNSize: '{{LUNSize}}'
+
+        - name: "MountIscsiDiskOnInstance1"
+          action: "aws:runCommand"
+          onFailure: "step:signalfailure"
+          inputs:
+            DocumentName: "AWS-RunRemoteScript"
+            InstanceIds: '{{GetClusterNode1.InstanceIds}}'
+            CloudWatchOutputConfig:
+              CloudWatchOutputEnabled: "true"
+              CloudWatchLogGroupName: !Ref 'SQLAutomationLogs'
+            Parameters:
+              sourceType: "S3"
+              sourceInfo: !Sub '{"path": "https://{{QSS3BucketName}}.s3.{{URLSuffix}}/MountIscsiDiskOnInstance.ps1"}'
+              commandLine: "./MountIscsiDiskOnInstance.ps1 -AdminSecret '{{AdminSecrets}}' -DomainNetBIOSName {{DomainNetBIOSName}} -FSxSVMIscsiIP1 {{FSxSVMIscsiIP1}} -FSxSVMIscsiIP2 {{FSxSVMIscsiIP2}} -SqlFSxInstanceIP '{{FindSecondaryIpAddresses.SecondaryPrivateIpAddresses}}'.split(';')[-2] -LUNSize {{LUNSize}} -DomainDNSName '{{DomainDNSName}}'"
+
+        - name: "MountIscsiDiskOnInstance2"
+          action: "aws:runCommand"
+          onFailure: "step:signalfailure"
+          inputs:
+            DocumentName: "AWS-RunRemoteScript"
+            InstanceIds: '{{GetClusterNode2.InstanceIds}}'
+            CloudWatchOutputConfig:
+              CloudWatchOutputEnabled: "true"
+              CloudWatchLogGroupName: !Ref 'SQLAutomationLogs'
+            Parameters:
+              sourceType: "S3"
+              sourceInfo: !Sub '{"path": "https://{{QSS3BucketName}}.s3.{{URLSuffix}}/MountIscsiDiskOnInstance.ps1"}'
+              commandLine: "./MountIscsiDiskOnInstance.ps1 -AdminSecret '{{AdminSecrets}}' -DomainNetBIOSName {{DomainNetBIOSName}} -FSxSVMIscsiIP1 {{FSxSVMIscsiIP1}} -FSxSVMIscsiIP2 {{FSxSVMIscsiIP2}} -SqlFSxInstanceIP '{{FindSecondaryIpAddresses.SecondaryPrivateIpAddresses}}'.split(';')[-1] -LUNSize {{LUNSize}} -DomainDNSName '{{DomainDNSName}}'"
+
 
         #Creating WSFC
         - name: "CreateNode1WsfcMOF"
@@ -1044,146 +1184,8 @@ Resources:
             Parameters:
               sourceType: "S3"
               sourceInfo: !Sub '{"path": "https://${QSS3BucketName}.s3.{{URLSuffix}}/Configure-MAD-Permissions.ps1"}'
-              commandLine: "./Configure-MAD-Permissions.ps1 -AdminSecret {{AdminSecrets}} -DomainNetBIOSName '{{DomainNetBIOSName}}' -wsfcName '{{ClusterName}}'"
+              commandLine: "./Configure-MAD-Permissions.ps1 -AdminSecret {{AdminSecrets}} -DomainNetBIOSName '{{DomainNetBIOSName}}' -wsfcName '{{ClusterName}}' -DomainDNSName '{{DomainDNSName}}'"
         
-        - name: "IscsiInitiator"
-          action: "aws:runCommand"
-          onFailure: "step:signalfailure"
-          inputs:
-            DocumentName: "AWS-RunRemoteScript"
-            InstanceIds: '{{GetAllClusterNodes.InstanceIds}}'
-            CloudWatchOutputConfig:
-              CloudWatchOutputEnabled: "true"
-              CloudWatchLogGroupName: !Ref 'SQLAutomationLogs'
-            Parameters:
-              sourceType: "S3"
-              sourceInfo: !Sub '{"path": "https://{{QSS3BucketName}}.s3.{{URLSuffix}}/IscsiInitiator.ps1"}'
-              commandLine: "./IscsiInitiator.ps1 -AdminSecret '{{AdminSecrets}}' -DomainNetBIOSName {{DomainNetBIOSName}}"
-        
-        - name: "IQNRetrival1"
-          action: "aws:runCommand"
-          inputs:
-            DocumentName: "AWS-RunPowerShellScript"
-            InstanceIds: '{{GetClusterNode1.InstanceIds}}'
-            Parameters:
-              commands: |
-                $iqn = (Get-InitiatorPort).NodeAddress
-                $output = @{
-                  iqn = $iqn
-                }
-                Write-Output ($iqn | ConvertTo-Json -Depth 100 -Compress)
-          outputs:
-            - Name: "IqnValue"
-              Selector: "$.AutomationExecution.Outputs['IQNRetrival'].CommandInvocation.Stdout"
-              Type: String
-          
-        - name: "IQNRetrival2"
-          action: "aws:runCommand"
-          inputs:
-            DocumentName: "AWS-RunPowerShellScript"
-            InstanceIds: '{{GetClusterNode2.InstanceIds}}'
-            Parameters:
-              commands: |
-                $iqn = (Get-InitiatorPort).NodeAddress
-                $output = @{
-                  iqn = $iqn
-                }
-                Write-Output ($iqn | ConvertTo-Json -Depth 100 -Compress)
-          outputs:
-            - Name: "IqnValue"
-              Selector: "$.AutomationExecution.Outputs['IQNRetrival'].CommandInvocation.Stdout"
-              Type: String
-
-        - name: IQNParse
-          action: 'aws:executeScript'
-          onFailure: "step:signalfailure"
-          inputs:
-            Runtime: PowerShell Core 6.0
-            Script:
-                |
-                 $inputPayload = $env:InputPayload | ConvertFrom-Json;
-                 $iqn1 = $inputPayload.parameter1
-                 $iqn2 = $inputPayload.parameter2
-
-                 $resultStr1 = $iqn1.Replace(" ", "").Trim().Replace('"','')
-                 $resultStr1 = "{0}" -f $resultStr1
-
-                 $resultStr2 = $iqn2.Replace(" ", "").Trim().Replace('"','')
-                 $resultStr2 = "{0}" -f $resultStr2
-
-                 $resultStr = "{0};{1}" -f $resultStr1, $resultStr2
-
-                 Write-Host $resultStr
-                 return @{message=$resultStr}
-            InputPayload:
-              parameter1: '{{IQNRetrival1.Output}}'
-              parameter2: '{{IQNRetrival2.Output}}'
-          outputs:
-            - Name: Iqn
-              Selector: $.Payload.message
-              Type: String
-
-        - name: "MPIOSetup"
-          action: "aws:runCommand"
-          onFailure: "step:signalfailure"
-          inputs:
-            DocumentName: "AWS-RunRemoteScript"
-            InstanceIds: '{{GetAllClusterNodes.InstanceIds}}'
-            CloudWatchOutputConfig:
-              CloudWatchOutputEnabled: "true"
-              CloudWatchLogGroupName: !Ref 'SQLAutomationLogs'
-            Parameters:
-              sourceType: "S3"
-              sourceInfo: !Sub '{"path": "https://{{QSS3BucketName}}.s3.{{URLSuffix}}/MPIOSetup.ps1"}'
-              commandLine: "./MPIOSetup.ps1 -AdminSecret '{{AdminSecrets}}' -DomainNetBIOSName {{DomainNetBIOSName}}"
-          
-        - name: 'InvokeSMBConfigLambda'
-          action: 'aws:invokeLambdaFunction'
-          inputs:
-            FunctionName: '{{CustomFsxCmdFunction}}'
-            Payload: !Sub
-              - '{ "ResourceRef1": "fsxadmin:${FSxAdminPassword}",
-                  "ResourceRef2": "${FSxMgmtIp}",
-                  "ResourceRef3": "${TrimmedIQN}",
-                  "ResourceRef4": "windows_2008",
-                  "ResourceRef5": "${SVMName}",
-                  "ResourceRef7": "${LUNSize}"
-                }'
-              - FSxAdminPassword: '{{FSxAdminPassword}}'
-                FSxMgmtIp: '{{FSxMgmtIp}}'
-                TrimmedIQN: '{{IQNParse.Iqn}}'
-                SVMName: '{{SVMName}}'
-                LUNSize: '{{LUNSize}}'
-
-        - name: "MountIscsiDiskOnInstance1"
-          action: "aws:runCommand"
-          onFailure: "step:signalfailure"
-          inputs:
-            DocumentName: "AWS-RunRemoteScript"
-            InstanceIds: '{{GetClusterNode1.InstanceIds}}'
-            CloudWatchOutputConfig:
-              CloudWatchOutputEnabled: "true"
-              CloudWatchLogGroupName: !Ref 'SQLAutomationLogs'
-            Parameters:
-              sourceType: "S3"
-              sourceInfo: !Sub '{"path": "https://{{QSS3BucketName}}.s3.{{URLSuffix}}/MountIscsiDiskOnInstance.ps1"}'
-              commandLine: "./MountIscsiDiskOnInstance.ps1 -AdminSecret '{{AdminSecrets}}' -DomainNetBIOSName {{DomainNetBIOSName}} -FSxSVMIscsiIP1 {{FSxSVMIscsiIP1}} -FSxSVMIscsiIP2 {{FSxSVMIscsiIP2}} -SqlFSxInstanceIP {{SqlFSxInstanceIP}} -LUNSize {{LUNSize}}"
-
-        - name: "MountIscsiDiskOnInstance2"
-          action: "aws:runCommand"
-          onFailure: "step:signalfailure"
-          inputs:
-            DocumentName: "AWS-RunRemoteScript"
-            InstanceIds: '{{GetClusterNode2.InstanceIds}}'
-            CloudWatchOutputConfig:
-              CloudWatchOutputEnabled: "true"
-              CloudWatchLogGroupName: !Ref 'SQLAutomationLogs'
-            Parameters:
-              sourceType: "S3"
-              sourceInfo: !Sub '{"path": "https://{{QSS3BucketName}}.s3.{{URLSuffix}}/MountIscsiDiskOnInstance.ps1"}'
-              commandLine: "./MountIscsiDiskOnInstance.ps1 -AdminSecret '{{AdminSecrets}}' -DomainNetBIOSName {{DomainNetBIOSName}} -FSxSVMIscsiIP1 {{FSxSVMIscsiIP1}} -FSxSVMIscsiIP2 {{FSxSVMIscsiIP2}} -SqlFSxInstanceIP '{{FindSecondaryIpAddresses.SecondaryPrivateIpAddresses}}'.split(';')[5] -LUNSize {{LUNSize}}"
-
-
         # Installing MSSQL FCI
         - name: "PrepareFCI"
           action: "aws:runCommand"
@@ -1197,7 +1199,7 @@ Resources:
             Parameters:
               sourceType: "S3"
               sourceInfo: !Sub '{"path": "https://{{QSS3BucketName}}.s3.{{URLSuffix}}/prepare-fci.ps1"}'
-              commandLine: "./prepare-fci.ps1 -AdminSecret '{{AdminSecrets}}' -DomainNetBIOSName {{DomainNetBIOSName}} -SqlUserSecret {{AdminSecrets}} -MSSQLMediaBucket '{{MSSQLMediaBucketName}}' -MSSQLMediaKey '{{MSSQLMediaPathKey}}'"
+              commandLine: "./prepare-fci.ps1 -AdminSecret '{{AdminSecrets}}' -DomainNetBIOSName {{DomainNetBIOSName}} -SqlUserSecret {{AdminSecrets}} -MSSQLMediaBucket '{{MSSQLMediaBucketName}}' -MSSQLMediaKey '{{MSSQLMediaPathKey}}' -DomainDNSName '{{DomainDNSName}}'"
               
         # - name: "CompleteFCI"
         #   action: "aws:runCommand"
@@ -1317,14 +1319,16 @@ Resources:
             - !Sub 'Rename-Computer -NewName "${SqlFSxServerNetBIOSName1}"'
             - "\n"
             - "$instanceId = (New-Object System.Net.WebClient).DownloadString('http://169.254.169.254/latest/meta-data/instance-id')\n"
-            - "$instanceIp = (New-Object System.Net.WebClient).DownloadString('http://169.254.169.254/latest/meta-data/local-ipv4')\n"
+            - "$webClient = New-Object System.Net.WebClient\n"
+            - "$url = 'https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/windows_amd64/AmazonSSMAgentSetup.exe'\n"
+            - "$outputPath = \"$env:USERPROFILE\\Desktop\\SSMAgent_latest.exe\"\n"
+            - "$webClient.DownloadFile($url, $outputPath)\n"
+            - "Start-Process -FilePath $outputPath -ArgumentList '/S'\n"
             - 'Start-SSMAutomationExecution -DocumentName '
             - !Sub '"${SqlFSxAutomation}"'
             - ' -Parameter @{'
             - '"SqlFSxInstanceId"='
             - "$instanceId"
-            - ';"SqlFSxInstanceIP"='
-            - "$instanceIp"
             - ';"URLSuffix"='
             - !Sub '"${AWS::URLSuffix}"'
             - ';"QSS3BucketName"='
@@ -1785,9 +1789,7 @@ Resources:
         ThroughputCapacity: !Ref FileShareThroughputCapacity
         #Password can be stored in Secrets manager and referenced from there
         FsxAdminPassword: !Ref FSxAdminPassword
-        RouteTableIds:
-          - "rtb-05348b4215f53e63b"
-          - "rtb-0f119d7b13cc01d26"
+        RouteTableIds: !Split [',', !Ref PrivateRouteTable]
         # RouteTableIds: !Split [',', !Ref PrivateRouteTable]
         # ActiveDirectoryId: !Sub '${DirectoryId}'
   FSxOntapStorageVirtualMachine:

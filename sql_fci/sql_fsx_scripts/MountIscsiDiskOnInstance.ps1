@@ -17,18 +17,22 @@ param(
     [string]$SqlFSxInstanceIP,
 
     [Parameter(Mandatory=$true)]
-    [string]$LUNSize
+    [string]$LUNSize,
+
+    [Parameter(Mandatory=$true)]
+    [string]$DomainDNSName
 
 )
 
 $HostName = hostname
+$HostAddress = "{0}.{1}" -f $HostName, $DomainDNSName
 
 # Getting Password from Secrets Manager for AD Admin User
 $AdminUser = ConvertFrom-Json -InputObject (Get-SECSecretValue -SecretId $AdminSecret).SecretString
 $ClusterAdminUser = $DomainNetBIOSName + '\' + $AdminUser.UserName
 # Creating Credential Object for Administrator
 $Credentials = (New-Object PSCredential($ClusterAdminUser,(ConvertTo-SecureString $AdminUser.Password -AsPlainText -Force)))
-
+$op = @()
 
 Invoke-Command -ScriptBlock {
     # need to fix this part
@@ -38,10 +42,15 @@ Invoke-Command -ScriptBlock {
     1..4 | %{Foreach($TargetPortal in $TargetPortals){Get-IscsiTarget | Connect-IscsiTarget -IsMultipathEnabled $true -TargetPortalAddress $TargetPortal -InitiatorPortalAddress $Using:SqlFSxInstanceIP -IsPersistent $true} }
     Set-MSDSMGlobalDefaultLoadBalancePolicy -Policy RR
     $disks = Get-Disk | where PartitionStyle -eq raw
+    if (!$disks) {
+        $op = "Error with Get-Disk command"
+        return $op
+    }
     foreach ($disk in $disks) {Initialize-Disk $disk.Number}
     $diskNumberString = Get-Disk | findstr NETAPP | findstr Online | findstr $Using:LUNSize
     $diskNumber = $diskNumberString.split()[0]
     New-Partition -DiskNumber $diskNumber -DriveLetter G -UseMaximumSize
     Format-Volume -DriveLetter G -FileSystem NTFS -AllocationUnitSize 65536
 
-} -Credential $Credentials -ComputerName $HostName -Authentication credssp
+} -Credential $Credentials -ComputerName $HostAddress -Authentication credssp
+$op

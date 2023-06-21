@@ -5,11 +5,15 @@ param(
     [string]$DomainNetBIOSName,
 
     [Parameter(Mandatory=$true)]
-    [string]$AdminSecret
+    [string]$AdminSecret,
+
+    [Parameter(Mandatory=$true)]
+    [string]$DomainDNSName
 
 )
 
 $HostName = hostname
+$HostAddress = "{0}.{1}" -f $HostName, $DomainDNSName
 
 # Getting Password from Secrets Manager for AD Admin User
 $AdminUser = ConvertFrom-Json -InputObject (Get-SECSecretValue -SecretId $AdminSecret).SecretString
@@ -21,4 +25,4 @@ $Credentials = (New-Object PSCredential($ClusterAdminUser,(ConvertTo-SecureStrin
 Invoke-Command -ScriptBlock {
     winrm quickconfig -quiet
     Install-WindowsFeature -name Multipath-IO -Restart
-} -Credential $Credentials -ComputerName $HostName -Authentication credssp 
+} -Credential $Credentials -ComputerName $HostAddress -Authentication credssp 

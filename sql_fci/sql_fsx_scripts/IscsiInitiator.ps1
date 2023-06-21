@@ -5,11 +5,15 @@ param(
     [string]$DomainNetBIOSName,
 
     [Parameter(Mandatory=$true)]
-    [string]$AdminSecret
+    [string]$AdminSecret,
+
+    [Parameter(Mandatory=$true)]
+    [string]$DomainDNSName
 
 )
 
 $HostName = hostname
+$HostAddress = "{0}.{1}" -f $HostName, $DomainDNSName
 
 # Getting Password from Secrets Manager for AD Admin User
 $AdminUser = ConvertFrom-Json -InputObject (Get-SECSecretValue -SecretId $AdminSecret).SecretString
@@ -23,4 +27,4 @@ Invoke-Command -ScriptBlock {
     Start-service -Name msiscsi
     Set-Service -Name msiscsi -StartupType Automatic
     Write-Output "Iscsi Setup completed"
-} -Credential $Credentials -ComputerName $HostName -Authentication credssp
+} -Credential $Credentials -ComputerName $HostAddress -Authentication credssp

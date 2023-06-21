@@ -90,20 +90,20 @@ Configuration WSFCNode1Config {
             DependsOn                     = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringCmdInterfaceFeature'
         }
 
-        # if ($FileServerNetBIOSName) {
-        xClusterQuorum 'SetQuorumToNodeAndFileShareMajority' {
-            IsSingleInstance = 'Yes'
-            Type             = 'NodeAndFileShareMajority'
-            Resource         = 'G:'
-            DependsOn        = '[xCluster]CreateCluster'
+        if ($FileServerNetBIOSName) {
+            xClusterQuorum 'SetQuorumToNodeAndFileShareMajority' {
+                IsSingleInstance = 'Yes'
+                Type             = 'NodeAndFileShareMajority'
+                Resource         = 'G:'
+                DependsOn        = '[xCluster]CreateCluster'
+            }
+        } else {
+            xClusterQuorum 'SetQuorumToNodeMajority' {
+                IsSingleInstance = 'Yes'
+                Type             = 'NodeMajority'
+                DependsOn        = '[xCluster]CreateCluster'
+            }
         }
-        # } else {
-        #     xClusterQuorum 'SetQuorumToNodeMajority' {
-        #         IsSingleInstance = 'Yes'
-        #         Type             = 'NodeMajority'
-        #         DependsOn        = '[xCluster]CreateCluster'
-        #     }
-        # }
     }
 }
 
